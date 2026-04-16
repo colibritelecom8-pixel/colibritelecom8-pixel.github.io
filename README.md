@@ -1,150 +1,308 @@
+# =========================
+# PROJECT STRUCTURE
+# =========================
+# modsite/
+# ├── manage.py
+# ├── modsite/
+# │   ├── __init__.py
+# │   ├── settings.py
+# │   ├── urls.py
+# │   ├── asgi.py
+# │   └── wsgi.py
+# ├── core/
+# │   ├── __init__.py
+# │   ├── models.py
+# │   ├── views.py
+# │   ├── forms.py
+# │   ├── urls.py
+# │   ├── utils.py
+# │   └── admin.py
+# └── templates/
+#     ├── base.html
+#     ├── register.html
+#     ├── login.html
+#     ├── dashboard.html
+#     ├── reports.html
+#     └── shop.html
+
+# =========================
+# INSTALL
+# =========================
+# pip install django
+# django-admin startproject modsite
+# cd modsite
+# python manage.py startapp core
+# python manage.py migrate
+# python manage.py createsuperuser
+# python manage.py runserver
+
+# =========================
+# settings.py (IMPORTANT PARTS)
+# =========================
+INSTALLED_APPS = [
+    'django.contrib.admin',
+    'django.contrib.auth',
+    'django.contrib.contenttypes',
+    'django.contrib.sessions',
+    'django.contrib.messages',
+    'django.contrib.staticfiles',
+    'core'
+]
+
+EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+DEFAULT_FROM_EMAIL = 'noreply@example.com'
+
+MEDIA_ROOT = 'media'
+MEDIA_URL = '/media/'
+
+# =========================
+# core/models.py
+# =========================
+from django.db import models
+from django.contrib.auth.models import User
 import random
-from datetime import datetime
-from typing import List, Optional
-from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Form
-from pydantic import BaseModel, EmailStr
-from sqlalchemy import create_engine, Column, Integer, String, Boolean, Float, DateTime, ForeignKey, Table
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, Session, relationship
 
-# --- НАСТРОЙКИ ---
-DATABASE_URL = "sqlite:///./site_data.db" # База данных в файле
-VK_TOKEN = "твой_токен_вк"
-VK_CHAT_ID = "1" # ID чата в ВК
+class Profile(models.Model):
+    user = models.OneToOneField(User, on_delete=models.CASCADE)
+    is_approved = models.BooleanField(default=False)
+    email_code = models.CharField(max_length=6, blank=True)
 
-# --- БД И МОДЕЛИ ---
-Base = declarative_base()
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+class Report(models.Model):
+    user = models.ForeignKey(User, on_delete=models.CASCADE)
+    nickname = models.CharField(max_length=100)
+    date = models.DateField()
+    description = models.TextField(blank=True)
+    file = models.FileField(upload_to='reports/')
 
-class UserDB(Base):
-    __tablename__ = "users"
-    id = Column(Integer, primary_key=True, index=True)
-    username = Column(String, unique=True)
-    email = Column(String, unique=True)
-    password = Column(String)
-    is_approved = Column(Boolean, default=False) # Одобрение админом
-    is_admin = Column(Boolean, default=False)
-    verification_code = Column(String, nullable=True)
+class Item(models.Model):
+    name = models.CharField(max_length=100)
+    chance = models.IntegerField(default=1)
 
-class ReportDB(Base):
-    __tablename__ = "reports"
-    id = Column(Integer, primary_key=True)
-    moderator_name = Column(String)
-    target_nickname = Column(String)
-    description = Column(String, nullable=True)
-    file_path = Column(String)
-    created_at = Column(DateTime, default=datetime.utcnow)
+class Case(models.Model):
+    name = models.CharField(max_length=100)
+    items = models.ManyToManyField(Item)
 
-class ProductDB(Base):
-    __tablename__ = "products"
-    id = Column(Integer, primary_key=True)
-    name = Column(String)
-    price = Column(Float)
-    drop_chance = Column(Integer, default=10) # Шанс в кейсе
+    def open_case(self):
+        pool = []
+        for item in self.items.all():
+            pool.extend([item]*item.chance)
+        return random.choice(pool)
 
-Base.metadata.create_all(bind=engine)
-app = FastAPI(title="Moderation Manager System")
+class Log(models.Model):
+    text = models.TextField()
+    created = models.DateTimeField(auto_now_add=True)
 
-# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
-def send_email_code(email: str, code: str):
-    print(f"📧 [EMAIL] Отправлен код {code} на почту {email}")
+# =========================
+# core/forms.py
+# =========================
+from django import forms
+from django.contrib.auth.models import User
+from .models import Report
 
-def send_vk_log(message: str):
-    print(f"🔵 [VK LOG] {message}")
-    # Тут будет код: requests.get(f"https://api.vk.com/method/messages.send?message={message}...")
+class RegisterForm(forms.ModelForm):
+    password = forms.CharField(widget=forms.PasswordInput)
 
-# --- API ЭНДПОИНТЫ ---
+    class Meta:
+        model = User
+        fields = ['username', 'email', 'password']
 
-# 1. Регистрация
-@app.post("/register")
-def register(username: str, email: EmailStr, password: str):
-    db = SessionLocal()
-    code = str(random.randint(100000, 999999))
-    new_user = UserDB(username=username, email=email, password=password, verification_code=code)
-    db.add(new_user)
-    db.commit()
-    send_email_code(email, code)
-    send_vk_log(f"Новая регистрация: {username}. Ожидает подтверждения кода и админа.")
-    return {"message": "Код отправлен на почту. После ввода кода ждите одобрения админа."}
+class ReportForm(forms.ModelForm):
+    class Meta:
+        model = Report
+        fields = ['nickname', 'date', 'description', 'file']
 
-# 2. Одобрение пользователя (Только для Админа)
-@app.post("/admin/approve/{user_id}")
-def approve_user(user_id: int, admin_id: int):
-    db = SessionLocal()
-    admin = db.query(UserDB).filter(UserDB.id == admin_id).first()
-    if not admin or not admin.is_admin:
-        raise HTTPException(status_code=403, detail="Нет прав")
-    
-    user = db.query(UserDB).filter(UserDB.id == user_id).first()
-    user.is_approved = True
-    db.commit()
-    send_vk_log(f"✅ Пользователь {user.username} одобрен админом {admin.username}")
-    return {"status": "User approved"}
+# =========================
+# core/utils.py
+# =========================
+import random
 
-# 3. Создание отчета
-@app.post("/reports/create")
-async def create_report(
-    moderator_id: int, 
-    target_nickname: str = Form(...), 
-    description: str = Form(None),
-    file: UploadFile = File(...)
-):
-    db = SessionLocal()
-    mod = db.query(UserDB).filter(UserDB.id == moderator_id).first()
-    if not mod or not mod.is_approved:
-        raise HTTPException(status_code=403, detail="Доступ запрещен или аккаунт не одобрен")
+def generate_code():
+    return str(random.randint(100000, 999999))
 
-    file_location = f"files/{file.filename}"
-    # Сохранение файла (упрощенно)
-    with open(file_location, "wb") as f:
-        f.write(await file.read())
 
-    report = ReportDB(
-        moderator_name=mod.username,
-        target_nickname=target_nickname,
-        description=description,
-        file_path=file_location
-    )
-    db.add(report)
-    db.commit()
+def send_vk_message(text):
+    print("[VK API]", text)  # заглушка
 
-    # Дублирование в ВК
-    log_msg = f"📝 ОТЧЕТ: {mod.username} -> {target_nickname}\nСуть: {description}\nФайл: {file_location}"
-    send_vk_log(log_msg)
-    
-    return {"status": "Report created"}
+# =========================
+# core/views.py
+# =========================
+from django.shortcuts import render, redirect
+from django.contrib.auth import login, authenticate
+from django.contrib.auth.decorators import login_required
+from django.contrib.auth.models import User
+from .forms import RegisterForm, ReportForm
+from .models import Profile, Report, Case, Log
+from .utils import generate_code, send_vk_message
 
-# 4. Магазин: Удаление/Изменение (Админ)
-@app.put("/admin/product/{item_id}")
-def update_product(item_id: int, name: str, price: float, admin_id: int):
-    db = SessionLocal()
-    admin = db.query(UserDB).filter(UserDB.id == admin_id).first()
-    if not admin.is_admin: raise HTTPException(status_code=403)
-    
-    item = db.query(ProductDB).filter(ProductDB.id == item_id).first()
-    item.name = name
-    item.price = price
-    db.commit()
-    return {"status": "Updated"}
 
-# 5. Магазин: Кейс (Рандом)
-@app.post("/shop/open-case")
-def open_case(user_id: int):
-    db = SessionLocal()
-    products = db.query(ProductDB).all()
-    if not products: return {"error": "Магазин пуст"}
-    
-    # Логика шансов
-    won_item = random.choices(
-        products, 
-        weights=[p.drop_chance for p in products], 
-        k=1
-    )[0]
-    
-    send_vk_log(f"🎁 Юзер {user_id} выбил из кейса: {won_item.name}")
-    return {"win": won_item.name}
+def register(request):
+    if request.method == 'POST':
+        form = RegisterForm(request.POST)
+        if form.is_valid():
+            user = form.save(commit=False)
+            user.set_password(form.cleaned_data['password'])
+            user.save()
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+            code = generate_code()
+            Profile.objects.create(user=user, email_code=code)
+
+            print(f"Email code: {code}")
+            return redirect('login')
+    else:
+        form = RegisterForm()
+    return render(request, 'register.html', {'form': form})
+
+@login_required
+def dashboard(request):
+    profile = request.user.profile
+    if not profile.is_approved:
+        return render(request, 'dashboard.html', {'pending': True})
+    return render(request, 'dashboard.html')
+
+@login_required
+def reports(request):
+    if request.method == 'POST':
+        form = ReportForm(request.POST, request.FILES)
+        if form.is_valid():
+            report = form.save(commit=False)
+            report.user = request.user
+            report.save()
+
+            send_vk_message(f"New report: {report.nickname}")
+            Log.objects.create(text=f"Report created by {request.user}")
+
+    else:
+        form = ReportForm()
+    return render(request, 'reports.html', {'form': form})
+
+@login_required
+def shop(request):
+    cases = Case.objects.all()
+    result = None
+    if 'open' in request.GET:
+        case = Case.objects.get(id=request.GET['open'])
+        result = case.open_case()
+        Log.objects.create(text=f"{request.user} opened case")
+    return render(request, 'shop.html', {'cases': cases, 'result': result})
+
+# =========================
+# core/admin.py
+# =========================
+from django.contrib import admin
+from .models import Profile, Report, Item, Case, Log
+
+admin.site.register(Profile)
+admin.site.register(Report)
+admin.site.register(Item)
+admin.site.register(Case)
+admin.site.register(Log)
+
+# =========================
+# core/urls.py
+# =========================
+from django.urls import path
+from . import views
+
+urlpatterns = [
+    path('', views.dashboard, name='dashboard'),
+    path('register/', views.register, name='register'),
+    path('reports/', views.reports, name='reports'),
+    path('shop/', views.shop, name='shop'),
+]
+
+# =========================
+# modsite/urls.py
+# =========================
+from django.contrib import admin
+from django.urls import path, include
+
+urlpatterns = [
+    path('admin/', admin.site.urls),
+    path('', include('core.urls')),
+]
+
+# =========================
+# templates/base.html
+# =========================
+"""
+<!DOCTYPE html>
+<html>
+<head>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+<style>
+body { background:#1e1e1e; color:white }
+.card { background:#2b2b2b }
+.btn-primary { background:#00ff88; border:none }
+</style>
+</head>
+<body>
+<div class="container mt-4">
+{% block content %}{% endblock %}
+</div>
+</body>
+</html>
+"""
+
+# =========================
+# templates/register.html
+# =========================
+"""
+{% extends 'base.html' %}
+{% block content %}
+<h2>Регистрация</h2>
+<form method="post">{% csrf_token %}
+{{ form.as_p }}
+<button class="btn btn-primary">Создать</button>
+</form>
+{% endblock %}
+"""
+
+# =========================
+# templates/dashboard.html
+# =========================
+"""
+{% extends 'base.html' %}
+{% block content %}
+{% if pending %}
+<h3>Ожидает одобрения</h3>
+{% else %}
+<h3>Добро пожаловать</h3>
+<a href="/reports/">Отчеты</a>
+<a href="/shop/">Магазин</a>
+{% endif %}
+{% endblock %}
+"""
+
+# =========================
+# templates/reports.html
+# =========================
+"""
+{% extends 'base.html' %}
+{% block content %}
+<h2>Отчет</h2>
+<form method="post" enctype="multipart/form-data">{% csrf_token %}
+{{ form.as_p }}
+<button class="btn btn-primary">Отправить</button>
+</form>
+{% endblock %}
+"""
+
+# =========================
+# templates/shop.html
+# =========================
+"""
+{% extends 'base.html' %}
+{% block content %}
+<h2>Кейсы</h2>
+{% for case in cases %}
+<div class="card p-3 mb-2">
+<h4>{{ case.name }}</h4>
+<a href="?open={{ case.id }}" class="btn btn-primary">Открыть</a>
+</div>
+{% endfor %}
+
+{% if result %}
+<h3>Вы получили: {{ result.name }}</h3>
+{% endif %}
+{% endblock %}
+"""
